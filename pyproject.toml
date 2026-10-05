@@ -1,0 +1,18 @@
+[project]
+name = "blockchain-from-scrath"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.142.2",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+]
+
+[tool.pyright]
+extraPaths = ["."]
+pythonVersion = "3.12"
+
+[tool.pyrefly]
+search-path = ["."]
+disable-search-path-heuristics = true
+python-interpreter-path = ".venv/bin/python"
