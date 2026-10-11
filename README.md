@@ -4,7 +4,7 @@ I'm using FastAPI for the HTTP layer, Pydantic for validating data.
 
 Next steps:
 
-- Implement P2P, signatures, a better PoW, Docker, variable difficulty to mine.
+- Implement P2P, Docker, Gossip.
 - Maybe a mining loop
 - Maybe a demo with some nodes using Docker with replicas mechanism or Kubernetes
 
