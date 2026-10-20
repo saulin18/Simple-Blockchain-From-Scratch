@@ -24,3 +24,13 @@ class InvalidAmountError(InvalidTransactionError):
 
 class SelfTransferError(InvalidTransactionError):
     """Sender and recipient must be different."""
+
+
+class DuplicatedTransactionError(InvalidTransactionError):
+    """Transaction is duplicated."""
+    
+class DuplicatedBlockError(BlockchainError):
+    """Block is duplicated."""
+
+class InvalidBlockError(BlockchainError):
+    """Block is invalid."""

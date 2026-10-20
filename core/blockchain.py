@@ -1,10 +1,14 @@
-
 import logging
 from time import time
 from urllib import parse
 from .block import Block
 from core.transaction import Transaction
-from core.exceptions import InsufficientFundsError
+from core.exceptions import (
+    InsufficientFundsError,
+    DuplicatedTransactionError,
+    DuplicatedBlockError,
+    InvalidBlockError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,23 +50,48 @@ class Blockchain:
         proof: int | None = None,
         previous_hash: str | None = None,
         is_pending_for_mining: bool = False,
-    ):
+        external_block: Block | None = None,  # For external blocks
+    ) -> Block:
         """
         Create a new Block in the Blockchain
         :param proof: <int> The proof given by the Proof of Work algorithm
         :param previous_hash: (Optional) <str> Hash of previous Block
         :param is_pending_for_mining: <bool> True if the block is pending for mining, False otherwise
-        :return: <dict> New Block
+        :param external_block: <Block> External block to add to the chain
+        :return: <Block> New Block
         """
 
         index_of_current_block = len(self.chain) + 1
-        block = Block(
+
+        if external_block:
+            for block in self.chain:
+                if block.hash == external_block.hash:
+                    raise DuplicatedBlockError(
+                        f"Block {external_block.index} is duplicated"
+                    )
+                    
+            if not self.validate_block(external_block, self.last_block):
+                raise InvalidBlockError(f"Block {external_block.index} is invalid")
+
+            if external_block.index != index_of_current_block:
+                raise InvalidBlockError(
+                    f"Block {external_block.index} is not the current block"
+                )
+
+            if external_block.difficulty != self.difficulty_for(
+                chain=self.chain, end=len(self.chain)
+            ):
+                raise InvalidBlockError(
+                    f"Block {external_block.index} has invalid difficulty"
+                )
+
+        block = external_block or Block(
             index=index_of_current_block,
             timestamp=int(time()),
             # Pending block has no proof
             nonce=proof or 0,
             previous_hash=previous_hash or self.last_block.hash,
-            data=self.current_transactions,
+            data=list(self.current_transactions),
             difficulty=self.difficulty_for(chain=self.chain, end=len(self.chain)),
         )
 
@@ -71,7 +100,16 @@ class Blockchain:
 
         tx_count = len(self.current_transactions)
         # Reset the current list of transactions
-        self.current_transactions = []
+        transactions_of_external_block = (
+            set(external_block.data)
+            if external_block
+            else set(self.current_transactions)
+        )
+        self.current_transactions = [
+            tx
+            for tx in self.current_transactions
+            if tx not in transactions_of_external_block
+        ]
 
         self.chain.append(block)
         logger.info(
@@ -90,11 +128,18 @@ class Blockchain:
         amount: int,
         signature: str | None = None,
         timestamp: int | None = None,
-    ) -> int:
+    ) -> Transaction:
         """
         Creates a new transaction to go into the next mined Block.
         Transaction-level rules live in Transaction.validate();
         chain-level rules (balance) live here.
+
+        :param sender: <str> Address of the sender
+        :param recipient: <str> Address of the recipient
+        :param amount: <int> Amount of the transaction
+        :param signature: <str> Signature of the transaction
+        :param timestamp: <int> Timestamp of the transaction
+        :return: <Transaction> Created transaction
         """
         logger.debug(
             "New transaction requested sender=%s recipient=%s amount=%s has_signature=%s",
@@ -112,6 +157,16 @@ class Blockchain:
             signature=signature or "",
         )
         transaction.validate()
+
+        if self.is_transaction_duplicated(transaction):
+            raise DuplicatedTransactionError(
+                f"Transaction {transaction.sender_address} -> {transaction.recipient_address} is duplicated"
+            )
+            
+        if self.is_transaction_in_mempool(transaction):
+            raise DuplicatedTransactionError(
+                f"Transaction {transaction.sender_address} -> {transaction.recipient_address} is already in the mempool"
+            )
 
         if not transaction.is_coinbase:
             available = self.get_balance(sender, include_pending_transactions=True)
@@ -136,8 +191,24 @@ class Blockchain:
             transaction.is_coinbase,
             target_block,
         )
-        return target_block
+        return transaction
 
+    def is_transaction_duplicated(self, transaction: Transaction) -> bool:
+        """
+        Check if a transaction is duplicated
+        :param transaction: <Transaction> Transaction to check
+        :return: <bool> True if duplicated, False otherwise
+        """
+        return any(tx == transaction for block in self.chain for tx in block.data)
+
+    def is_transaction_in_mempool(self, transaction: Transaction) -> bool:
+        """
+        Check if a transaction is in the mempool
+        :param transaction: <Transaction> Transaction to check
+        :return: <bool> True if in the mempool, False otherwise
+        """
+        return any(tx == transaction for tx in self.current_transactions)
+    
     @property
     def last_block(self) -> Block:
         """Returns the last Block in the chain
@@ -169,10 +240,28 @@ class Blockchain:
         :param last_block: <Block> Last block in the chain
         :return: <bool> True if valid, False if not
         """
-        return (
+
+        if not (
             block.hash[: block.difficulty] == "0" * block.difficulty
             and block.previous_hash == last_block.hash
-        )
+        ):
+            return False
+
+        for tx in block.data:
+            if self.is_transaction_duplicated(tx):
+                return False
+
+            try:
+                tx.validate()
+            except Exception as e:
+                logger.warning(
+                    "Transaction invalid at index=%s: error=%s",
+                    block.index,
+                    str(e),
+                )
+                return False
+
+        return True
 
     def valid_chain(self, chain: list[Block]) -> bool:
         """
@@ -224,6 +313,7 @@ class Blockchain:
         :param include_pending_transactions: <bool> Whether to include pending transactions in the balance
         :return: <int> Balance of the address
         """
+
         balance = 0
         for block in self.chain:
             for transaction in block.data:
@@ -231,6 +321,7 @@ class Blockchain:
                     balance -= transaction.amount
                 if transaction.recipient_address == address:
                     balance += transaction.amount
+
         if include_pending_transactions:
             for transaction in self.current_transactions:
                 if transaction.sender_address == address:

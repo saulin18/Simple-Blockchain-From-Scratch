@@ -46,6 +46,20 @@ class Transaction:
             f"recipient={self.recipient_address}, amount={self.amount})"
         )
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Transaction):
+            return NotImplemented
+        return (
+            self.sender_address == other.sender_address
+            and self.recipient_address == other.recipient_address
+            and self.amount == other.amount
+            and self.timestamp == other.timestamp
+            and self.signature == other.signature
+        )
+        
+    def __hash__(self) -> int:
+        return hash((self.sender_address, self.recipient_address, self.amount, self.timestamp, self.signature))
+
     @property
     def is_coinbase(self) -> bool:
         return self.sender_address == COINBASE_SENDER

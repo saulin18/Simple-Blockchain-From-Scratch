@@ -1,6 +1,11 @@
-
+from fastapi.responses import JSONResponse
+from core.exceptions import (
+    DuplicatedTransactionError,
+    InvalidBlockError,
+    DuplicatedBlockError,
+    BlockchainError
+)
 from fastapi import Depends
-from core.exceptions import BlockchainError
 from typing import Any, cast
 from core.consensus import Consensues
 from models import BlockModel
@@ -10,7 +15,7 @@ from logging_config import LOGGING_CONFIG
 from typing import TypedDict
 
 from core.blockchain import Blockchain
-
+from core.transaction import Transaction
 from fastapi.middleware.cors import CORSMiddleware
 
 from models import (
@@ -25,7 +30,7 @@ from models import (
 from logging import getLogger
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from middlewares import blockchain_error_handler, RequestContextLogMiddleware 
+from middlewares import blockchain_error_handler, RequestContextLogMiddleware
 
 logger = getLogger(__name__)
 
@@ -40,9 +45,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[LifespanState, Any]:
     yield lifespan_state
     # close clients, release any open resources
 
+
 def get_blockchain(http: Request) -> Blockchain:
     state = cast(LifespanState, http.state)
     return state["blockchain"]
+
+
+def get_consensues(blockchain: Blockchain = Depends(get_blockchain)) -> Consensues:
+    return Consensues(blockchain.nodes, blockchain)
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -56,6 +67,7 @@ app.add_middleware(
 app.add_middleware(RequestContextLogMiddleware)
 app.add_exception_handler(BlockchainError, blockchain_error_handler)
 
+
 @app.get("/")
 def main():
     logger.info("Hello World")
@@ -63,7 +75,11 @@ def main():
 
 
 @app.get("/mine")
-def mine(request: MineRequest, blockchain: Blockchain = Depends(get_blockchain)) -> MineResponse:
+async def mine(
+    request: MineRequest,
+    blockchain: Blockchain = Depends(get_blockchain),
+    validator: Consensues = Depends(get_consensues),
+) -> MineResponse:
     # The sender is "0" to signify that this node has mined a new coin.
     request.validate_address()
     blockchain.new_transaction(
@@ -75,6 +91,8 @@ def mine(request: MineRequest, blockchain: Blockchain = Depends(get_blockchain))
 
     block = blockchain.new_block(is_pending_for_mining=True)
     logger.info("Mine completed index=%s hash=%s", block.index, block.hash)
+
+    await validator.push_block_to_neighbours(BlockModel.from_block(block))
 
     return MineResponse(
         message="New Block Forged",
@@ -90,27 +108,58 @@ def mine(request: MineRequest, blockchain: Blockchain = Depends(get_blockchain))
     )
 
 
+@app.post("/blocks/new")
+async def new_block(
+    block: BlockModel,
+    blockchain: Blockchain = Depends(get_blockchain),
+    validator: Consensues = Depends(get_consensues),
+):
+    logger.info("POST /blocks/new index=%s hash=%s", block.index, block.hash)
+    external_block = BlockModel.to_block(block)
+
+    try:
+        blockchain.new_block(external_block=external_block)
+    except (DuplicatedBlockError, InvalidBlockError) as e:
+        return JSONResponse(content={"message": str(e)}, status_code=400)
+    await validator.push_block_to_neighbours(block)
+    return JSONResponse(content={"message": "Block accepted"}, status_code=200)
+
+
 @app.post("/transactions/new")
-def new_transaction(transaction: TransactionModel, blockchain: Blockchain = Depends(get_blockchain)):
+async def new_transaction(
+    transaction: TransactionModel,
+    blockchain: Blockchain = Depends(get_blockchain),
+    validator: Consensues = Depends(get_consensues),
+):
     logger.info(
         "POST /transactions/new from=%s to=%s amount=%s",
         transaction.from_address,
         transaction.to_address,
         transaction.amount,
     )
-    index = blockchain.new_transaction(
-        transaction.from_address,
-        transaction.to_address,
-        transaction.amount,
-        transaction.signature,
-        transaction.timestamp,
+    try:
+        created_transaction: Transaction = blockchain.new_transaction(
+            transaction.from_address,
+            transaction.to_address,
+            transaction.amount,
+            transaction.signature,
+            transaction.timestamp,
+        )
+    except DuplicatedTransactionError as e:
+        return JSONResponse(content={"message": str(e)}, status_code=400)
+    await validator.push_transaction_to_neighbours(
+        TransactionModel.from_transaction(created_transaction)
     )
-    return {"message": f"Transaction will be added to Block {index}"}
+    return {
+        "message": f"Transaction will be added to Block {blockchain.last_block.index + 1}"
+    }
 
 
 @app.get("/balance/{address}")
 def get_balance(
-    address: str, blockchain: Blockchain = Depends(get_blockchain), include_pending: bool = False
+    address: str,
+    blockchain: Blockchain = Depends(get_blockchain),
+    include_pending: bool = False,
 ):
     balance = blockchain.get_balance(
         address, include_pending_transactions=include_pending

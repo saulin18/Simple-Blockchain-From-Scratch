@@ -1,3 +1,5 @@
+from models import TransactionModel
+from core.transaction import Transaction
 from core.blockchain import Blockchain
 from logging import getLogger
 import httpx
@@ -92,3 +94,41 @@ class Consensues:
             "Local chain remains authoritative length=%s", len(self.blockchain.chain)
         )
         return False
+    
+    async def push_transaction_to_neighbours(self, transaction: TransactionModel) -> None:
+        """
+        Push the transaction to the neighbours
+        :param transaction: <TransactionModel> Transaction to push
+        :return: None
+        """
+        async with httpx.AsyncClient() as client:
+            for node in self.nodes:
+                url = f"http://{node}/transactions/new"
+                try:
+                    response = await client.post(url, json=transaction.model_dump())
+                except httpx.HTTPError as exc:
+                    logger.warning("Peer unreachable node=%s error=%s", node, exc)
+                    continue
+                if response.status_code != 200:
+                    logger.warning("Peer bad status node=%s status=%s", node, response.status_code)
+                    continue
+                logger.info("Transaction sent to node=%s", node)
+                
+    async def push_block_to_neighbours(self, block: BlockModel) -> None:
+        """
+        Push the block to the neighbours
+        :param block: <BlockModel> Block to push
+        :return: None
+        """
+        async with httpx.AsyncClient() as client:
+            for node in self.nodes:
+                url = f"http://{node}/blocks/new"
+                try:
+                    response = await client.post(url, json=block.model_dump())
+                except httpx.HTTPError as exc:
+                    logger.warning("Peer unreachable node=%s error=%s", node, exc)
+                    continue
+                if response.status_code != 200:
+                    logger.warning("Peer bad status node=%s status=%s", node, response.status_code)
+                    continue
+                logger.info("Block sent to node=%s", node)
