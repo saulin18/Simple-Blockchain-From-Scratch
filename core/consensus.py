@@ -82,7 +82,26 @@ class Consensues:
                     new_chain = blocks
         if new_chain:
             old_length = len(self.blockchain.chain)
-            self.blockchain.current_transactions = []
+
+            old_recorded_transactions = set(
+                [
+                    transaction
+                    for block in self.blockchain.chain
+                    for transaction in block.data
+                ]
+            ).union(set(self.blockchain.current_transactions))
+
+            transactions_in_new_chain = set(
+                [transaction for block in new_chain for transaction in block.data]
+            )
+
+            self.blockchain.current_transactions = list(
+                transaction
+                for transaction in old_recorded_transactions
+                if transaction not in transactions_in_new_chain
+                and not transaction.is_coinbase
+            )
+            
             self.blockchain.chain = new_chain
             logger.info(
                 "Local chain replaced old_length=%s new_length=%s",
@@ -94,8 +113,10 @@ class Consensues:
             "Local chain remains authoritative length=%s", len(self.blockchain.chain)
         )
         return False
-    
-    async def push_transaction_to_neighbours(self, transaction: TransactionModel) -> None:
+
+    async def push_transaction_to_neighbours(
+        self, transaction: TransactionModel
+    ) -> None:
         """
         Push the transaction to the neighbours
         :param transaction: <TransactionModel> Transaction to push
@@ -110,10 +131,12 @@ class Consensues:
                     logger.warning("Peer unreachable node=%s error=%s", node, exc)
                     continue
                 if response.status_code != 200:
-                    logger.warning("Peer bad status node=%s status=%s", node, response.status_code)
+                    logger.warning(
+                        "Peer bad status node=%s status=%s", node, response.status_code
+                    )
                     continue
                 logger.info("Transaction sent to node=%s", node)
-                
+
     async def push_block_to_neighbours(self, block: BlockModel) -> None:
         """
         Push the block to the neighbours
@@ -129,6 +152,8 @@ class Consensues:
                     logger.warning("Peer unreachable node=%s error=%s", node, exc)
                     continue
                 if response.status_code != 200:
-                    logger.warning("Peer bad status node=%s status=%s", node, response.status_code)
+                    logger.warning(
+                        "Peer bad status node=%s status=%s", node, response.status_code
+                    )
                     continue
                 logger.info("Block sent to node=%s", node)

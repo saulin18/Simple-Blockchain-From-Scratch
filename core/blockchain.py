@@ -1,3 +1,4 @@
+from collections import defaultdict
 import logging
 from time import time
 from urllib import parse
@@ -69,8 +70,11 @@ class Blockchain:
                     raise DuplicatedBlockError(
                         f"Block {external_block.index} is duplicated"
                     )
-                    
-            if not self.validate_block(external_block, self.last_block):
+
+            result = self.validate_block(external_block, self.last_block)
+            if result == "fork":
+                raise InvalidBlockError("fork")
+            if result is not True:
                 raise InvalidBlockError(f"Block {external_block.index} is invalid")
 
             if external_block.index != index_of_current_block:
@@ -162,7 +166,7 @@ class Blockchain:
             raise DuplicatedTransactionError(
                 f"Transaction {transaction.sender_address} -> {transaction.recipient_address} is duplicated"
             )
-            
+
         if self.is_transaction_in_mempool(transaction):
             raise DuplicatedTransactionError(
                 f"Transaction {transaction.sender_address} -> {transaction.recipient_address} is already in the mempool"
@@ -193,13 +197,17 @@ class Blockchain:
         )
         return transaction
 
-    def is_transaction_duplicated(self, transaction: Transaction) -> bool:
+    def is_transaction_duplicated(
+        self, transaction: Transaction, chain: list[Block] | None = None
+    ) -> bool:
         """
         Check if a transaction is duplicated
         :param transaction: <Transaction> Transaction to check
+        :param chain: <list[Block]> Chain to check
         :return: <bool> True if duplicated, False otherwise
         """
-        return any(tx == transaction for block in self.chain for tx in block.data)
+        chain = self.chain if chain is None else chain
+        return any(tx == transaction for block in chain for tx in block.data)
 
     def is_transaction_in_mempool(self, transaction: Transaction) -> bool:
         """
@@ -208,7 +216,7 @@ class Blockchain:
         :return: <bool> True if in the mempool, False otherwise
         """
         return any(tx == transaction for tx in self.current_transactions)
-    
+
     @property
     def last_block(self) -> Block:
         """Returns the last Block in the chain
@@ -233,23 +241,57 @@ class Blockchain:
             len(self.nodes),
         )
 
-    def validate_block(self, block: Block, last_block: Block) -> bool:
+    def validate_block(
+        self, block: Block, last_block: Block, chain: list[Block] | None = None
+    ) -> bool | str:
         """
         Validate a block
         :param block: <Block> Block to validate
         :param last_block: <Block> Last block in the chain
         :return: <bool> True if valid, False if not
         """
+        chain = self.chain if chain is None else chain
 
-        if not (
+        pow_ok = (
             block.hash[: block.difficulty] == "0" * block.difficulty
-            and block.previous_hash == last_block.hash
-        ):
+        )
+        links = block.previous_hash == last_block.hash
+        if pow_ok and not links:
+            return "fork"
+
+        if not pow_ok or not links:
             return False
 
+        seen_transactions = set()
+        # Just one coinbase per block
+        is_seen_coinbase = False
+        accumulated_balance: defaultdict[str, int] = defaultdict(int)
+        for past in chain:
+            for tx in past.data:
+                accumulated_balance[tx.sender_address] -= tx.amount
+                accumulated_balance[tx.recipient_address] += tx.amount
+
         for tx in block.data:
-            if self.is_transaction_duplicated(tx):
+            if self.is_transaction_duplicated(tx, chain=chain):
                 return False
+
+            if tx in seen_transactions:
+                return False
+
+            seen_transactions.add(tx)
+
+            if tx.is_coinbase and (tx.amount != 1 or is_seen_coinbase):
+                return False
+
+            if tx.is_coinbase:
+                is_seen_coinbase = True
+                accumulated_balance[tx.recipient_address] += tx.amount
+            else:
+                accumulated_balance[tx.sender_address] -= tx.amount
+
+                if accumulated_balance[tx.sender_address] < 0:
+                    return False
+                accumulated_balance[tx.recipient_address] += tx.amount
 
             try:
                 tx.validate()
@@ -260,6 +302,9 @@ class Blockchain:
                     str(e),
                 )
                 return False
+
+        if not is_seen_coinbase:
+            return False
 
         return True
 
@@ -291,7 +336,7 @@ class Blockchain:
 
             logger.debug("Block hash=%s difficulty=%s", block.hash, block.difficulty)
             # Validate the proof of work like we mined the block
-            if not self.validate_block(block, last_block):
+            if self.validate_block(block, last_block, chain=chain[:current_index]) is not True:
                 logger.warning(
                     "Chain invalid at index=%s: invalid proof",
                     current_index,

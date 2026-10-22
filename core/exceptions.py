@@ -33,4 +33,8 @@ class DuplicatedBlockError(BlockchainError):
     """Block is duplicated."""
 
 class InvalidBlockError(BlockchainError):
+    reason: str
     """Block is invalid."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Block is invalid: {reason}")

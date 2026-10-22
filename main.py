@@ -3,9 +3,9 @@ from core.exceptions import (
     DuplicatedTransactionError,
     InvalidBlockError,
     DuplicatedBlockError,
-    BlockchainError
+    BlockchainError,
 )
-from fastapi import Depends
+from fastapi import Depends, BackgroundTasks
 from typing import Any, cast
 from core.consensus import Consensues
 from models import BlockModel
@@ -76,6 +76,7 @@ def main():
 
 @app.get("/mine")
 async def mine(
+    background_tasks: BackgroundTasks,
     request: MineRequest,
     blockchain: Blockchain = Depends(get_blockchain),
     validator: Consensues = Depends(get_consensues),
@@ -92,7 +93,9 @@ async def mine(
     block = blockchain.new_block(is_pending_for_mining=True)
     logger.info("Mine completed index=%s hash=%s", block.index, block.hash)
 
-    await validator.push_block_to_neighbours(BlockModel.from_block(block))
+    background_tasks.add_task(
+        validator.push_block_to_neighbours, BlockModel.from_block(block)
+    )
 
     return MineResponse(
         message="New Block Forged",
@@ -110,23 +113,30 @@ async def mine(
 
 @app.post("/blocks/new")
 async def new_block(
+    background_tasks: BackgroundTasks,
     block: BlockModel,
     blockchain: Blockchain = Depends(get_blockchain),
     validator: Consensues = Depends(get_consensues),
 ):
+    """
+    Receive a new block from a neighbour and add it to the blockchain. Push a block to the blockchain.
+    """
     logger.info("POST /blocks/new index=%s hash=%s", block.index, block.hash)
     external_block = BlockModel.to_block(block)
 
     try:
         blockchain.new_block(external_block=external_block)
     except (DuplicatedBlockError, InvalidBlockError) as e:
+        if isinstance(e, InvalidBlockError) and e.reason == "fork":
+            background_tasks.add_task(validator.resolve_conflicts)
         return JSONResponse(content={"message": str(e)}, status_code=400)
-    await validator.push_block_to_neighbours(block)
+    background_tasks.add_task(validator.push_block_to_neighbours, block)
     return JSONResponse(content={"message": "Block accepted"}, status_code=200)
 
 
 @app.post("/transactions/new")
 async def new_transaction(
+    background_tasks: BackgroundTasks,
     transaction: TransactionModel,
     blockchain: Blockchain = Depends(get_blockchain),
     validator: Consensues = Depends(get_consensues),
@@ -137,6 +147,12 @@ async def new_transaction(
         transaction.to_address,
         transaction.amount,
     )
+    is_coinbase = transaction.from_address == "0"
+    if is_coinbase:
+        return JSONResponse(
+            content={"message": "Coinbase transaction is not allowed"}, status_code=400
+        )
+
     try:
         created_transaction: Transaction = blockchain.new_transaction(
             transaction.from_address,
@@ -147,9 +163,12 @@ async def new_transaction(
         )
     except DuplicatedTransactionError as e:
         return JSONResponse(content={"message": str(e)}, status_code=400)
-    await validator.push_transaction_to_neighbours(
-        TransactionModel.from_transaction(created_transaction)
+
+    background_tasks.add_task(
+        validator.push_transaction_to_neighbours,
+        TransactionModel.from_transaction(created_transaction),
     )
+
     return {
         "message": f"Transaction will be added to Block {blockchain.last_block.index + 1}"
     }
