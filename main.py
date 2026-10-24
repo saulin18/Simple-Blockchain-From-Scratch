@@ -225,6 +225,18 @@ async def consensus(
         chain=[BlockModel.from_block(block) for block in blockchain.chain],
     )
 
+@app.get("/transaction/{transaction_signature}/depth")
+def get_transaction_depth(
+    transaction_signature: str,
+    blockchain: Blockchain = Depends(get_blockchain),
+) -> dict[str, int]:
+    """Get the depth of a transaction
+    :param transaction_signature: <str> Signature of the transaction
+    :param blockchain: <Blockchain> Blockchain to get the depth from
+    :return: <dict[str, int]> Dictionary with the depth of the transaction
+    """
+    depth = blockchain.get_transaction_depth(transaction_signature)
+    return {"depth": depth}
 
 if __name__ == "__main__":
     uvicorn.run(

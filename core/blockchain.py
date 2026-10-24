@@ -45,6 +45,19 @@ class Blockchain:
         if actual > expected * 2:
             return max(difficulty - 1, 1)
         return difficulty
+    
+    def reward_for(self, end: int) -> int:
+        """
+        Get the reward for a given chain and end
+        :param end: <int> Height of the chain
+        :return: <int> Reward
+        """
+        reward = 100
+        
+        for _ in range(end // 10):
+            reward = reward * 85 // 100
+        
+        return max(reward, 1)
 
     def new_block(
         self,
@@ -216,6 +229,18 @@ class Blockchain:
         :return: <bool> True if in the mempool, False otherwise
         """
         return any(tx == transaction for tx in self.current_transactions)
+    
+    def get_transaction_depth(self, transaction_signature: str) -> int:
+        """
+        Get the depth of a transaction
+        :param transaction_signature: <str> Signature of the transaction
+        :return: <int> Depth of the transaction
+        """
+        for block in self.chain:
+            for transaction in block.data:
+                if transaction.signature == transaction_signature:
+                    return len(self.chain) - block.index + 1
+        return 0
 
     @property
     def last_block(self) -> Block:
