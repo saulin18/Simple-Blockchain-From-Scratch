@@ -13,6 +13,8 @@ from core.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+MAX_TRANSACTIONS_PER_BLOCK = 10
+
 
 class Blockchain:
     def __init__(self):
@@ -20,8 +22,10 @@ class Blockchain:
         self.current_transactions: list[Transaction] = []
         self.nodes: set[str] = set()
         self.difficulty: int = 3
+        self.address_to_balance = defaultdict(int)
         # Initial block
         self.new_block(proof=100, previous_hash="1")
+
         logger.info("Blockchain initialized with genesis block")
 
     def difficulty_for(self, chain: list[Block], end: int) -> int:
@@ -45,7 +49,7 @@ class Blockchain:
         if actual > expected * 2:
             return max(difficulty - 1, 1)
         return difficulty
-    
+
     def reward_for(self, end: int) -> int:
         """
         Get the reward for a given chain and end
@@ -53,11 +57,80 @@ class Blockchain:
         :return: <int> Reward
         """
         reward = 100
-        
+
         for _ in range(end // 10):
             reward = reward * 85 // 100
-        
+
         return max(reward, 1)
+
+    def coinbase_amount(self, end: int, transactions: list[Transaction]) -> int:
+        """Subsidy for this height plus the fees of the transactions in the block."""
+        fees = sum(tx.fee for tx in transactions if not tx.is_coinbase)
+        return self.reward_for(end) + fees
+
+    def select_transactions(self, balance: defaultdict[str, int]) -> list[Transaction]:
+        """
+        Transactions this node will put in the next block.
+        Higher fee first. The cap is local policy: a block that arrives
+        with another selection is still valid.
+        """
+        dropped: set[Transaction] = set()
+        pending: list[Transaction] = []
+        ordered = sorted(
+            (tx for tx in self.current_transactions if not tx.is_coinbase),
+            key=lambda tx: (-tx.fee, tx.timestamp or 0),
+        )
+
+        for tx in ordered:
+            cost = tx.amount + tx.fee
+            if cost > balance[tx.sender_address]:
+                dropped.add(tx)
+                continue
+            if len(pending) >= MAX_TRANSACTIONS_PER_BLOCK:
+                break
+            balance[tx.sender_address] -= cost
+            balance[tx.recipient_address] += tx.amount
+            pending.append(tx)
+
+        self.current_transactions = [
+            tx for tx in self.current_transactions if tx not in dropped
+        ]
+        return pending
+
+    def prepare_block(
+        self, miner_address: str, transactions: list[Transaction]
+    ) -> Block:
+        """
+        Prepares a block for mining with the given miner address and transactions, it does not mine the block.
+        :param miner_address: <str> Address of the miner
+        :param transactions: <list[Transaction]> Transactions to put in the block
+        :return: <Block> Prepared block
+        """
+
+        selected = (
+            transactions
+            if transactions is not None
+            else self.select_transactions(balance=self.address_to_balance.copy())
+        )
+        # Mined a new coin
+        coinbase = Transaction(
+            sender_address="0",
+            recipient_address=miner_address,
+            amount=self.coinbase_amount(len(self.chain), selected),
+            fee=0,
+        )
+        data = [coinbase, *selected]
+
+        block = Block(
+            index=len(self.chain) + 1,
+            timestamp=int(time()),
+            nonce=0,
+            previous_hash=self.last_block.hash,
+            data=data,
+            difficulty=self.difficulty_for(chain=self.chain, end=len(self.chain)),
+        )
+
+        return block
 
     def new_block(
         self,
@@ -84,7 +157,11 @@ class Blockchain:
                         f"Block {external_block.index} is duplicated"
                     )
 
-            result = self.validate_block(external_block, self.last_block)
+            result = self.validate_block(
+                external_block,
+                self.last_block,
+                address_to_balance=self.address_to_balance.copy(),
+            )
             if result == "fork":
                 raise InvalidBlockError("fork")
             if result is not True:
@@ -102,33 +179,46 @@ class Blockchain:
                     f"Block {external_block.index} has invalid difficulty"
                 )
 
-        block = external_block or Block(
-            index=index_of_current_block,
-            timestamp=int(time()),
-            # Pending block has no proof
-            nonce=proof or 0,
-            previous_hash=previous_hash or self.last_block.hash,
-            data=list(self.current_transactions),
-            difficulty=self.difficulty_for(chain=self.chain, end=len(self.chain)),
-        )
+        if external_block:
+            block = external_block
+        else:
+
+            data = list(self.current_transactions)
+
+            block = Block(
+                index=index_of_current_block,
+                timestamp=int(time()),
+                nonce=proof or 0,
+                previous_hash=previous_hash or self.last_block.hash,
+                data=data,
+                difficulty=self.difficulty_for(chain=self.chain, end=len(self.chain)),
+            )
 
         if is_pending_for_mining:
             block.mine()
 
-        tx_count = len(self.current_transactions)
-        # Reset the current list of transactions
-        transactions_of_external_block = (
-            set(external_block.data)
-            if external_block
-            else set(self.current_transactions)
-        )
+        self.commit_block(block)
+        return block
+
+    def commit_block(self, block: Block) -> None:
+        """
+        Commits a block to the blockchain
+        :param block: <Block> Block to commit
+        :return: None
+        """
+
+        tx_count = len(block.data)
+        included = set(block.data)
         self.current_transactions = [
-            tx
-            for tx in self.current_transactions
-            if tx not in transactions_of_external_block
+            tx for tx in self.current_transactions if tx not in included
         ]
 
         self.chain.append(block)
+
+        for tx in block.data:
+            self.address_to_balance[tx.sender_address] -= tx.amount + tx.fee
+            self.address_to_balance[tx.recipient_address] += tx.amount
+
         logger.info(
             "Block forged index=%s nonce=%s txs=%s hash=%s",
             block.index,
@@ -136,7 +226,6 @@ class Blockchain:
             tx_count,
             block.hash,
         )
-        return block
 
     def new_transaction(
         self,
@@ -145,6 +234,7 @@ class Blockchain:
         amount: int,
         signature: str | None = None,
         timestamp: int | None = None,
+        fee: int = 0,
     ) -> Transaction:
         """
         Creates a new transaction to go into the next mined Block.
@@ -159,10 +249,11 @@ class Blockchain:
         :return: <Transaction> Created transaction
         """
         logger.debug(
-            "New transaction requested sender=%s recipient=%s amount=%s has_signature=%s",
+            "New transaction requested sender=%s recipient=%s amount=%s fee=%s has_signature=%s",
             sender,
             recipient,
             amount,
+            fee,
             bool(signature),
         )
 
@@ -172,6 +263,7 @@ class Blockchain:
             amount,
             timestamp=timestamp,
             signature=signature or "",
+            fee=fee,
         )
         transaction.validate()
 
@@ -187,24 +279,27 @@ class Blockchain:
 
         if not transaction.is_coinbase:
             available = self.get_balance(sender, include_pending_transactions=True)
-            if available < amount:
+            cost = amount + transaction.fee
+            if available < cost:
                 logger.warning(
-                    "Insufficient funds sender=%s balance=%s amount=%s",
+                    "Insufficient funds sender=%s balance=%s amount=%s fee=%s",
                     sender,
                     available,
                     amount,
+                    transaction.fee,
                 )
                 raise InsufficientFundsError(
-                    f"Sender does not have enough funds (balance={available}, amount={amount})"
+                    f"Sender does not have enough funds (balance={available}, amount={amount}, fee={transaction.fee})"
                 )
 
         target_block = self.last_block.index + 1
         self.current_transactions.append(transaction)
         logger.info(
-            "Transaction accepted sender=%s recipient=%s amount=%s coinbase=%s pending_block=%s",
+            "Transaction accepted sender=%s recipient=%s amount=%s fee=%s coinbase=%s pending_block=%s",
             sender,
             recipient,
             amount,
+            transaction.fee,
             transaction.is_coinbase,
             target_block,
         )
@@ -229,7 +324,7 @@ class Blockchain:
         :return: <bool> True if in the mempool, False otherwise
         """
         return any(tx == transaction for tx in self.current_transactions)
-    
+
     def get_transaction_depth(self, transaction_signature: str) -> int:
         """
         Get the depth of a transaction
@@ -253,7 +348,7 @@ class Blockchain:
     def register_node(self, address: str) -> None:
         """
         Add a new node to the list of nodes
-        :param address: <str> Address of node. Eg. 'http://192.168.0.5:5000'
+        :param address: <str> Address of node. Eg. 'http://192.168.0.5:8000'
         :return: None
         """
 
@@ -267,19 +362,23 @@ class Blockchain:
         )
 
     def validate_block(
-        self, block: Block, last_block: Block, chain: list[Block] | None = None
+        self,
+        block: Block,
+        last_block: Block,
+        chain: list[Block] | None = None,
+        address_to_balance: defaultdict[str, int] | None = None,
     ) -> bool | str:
         """
         Validate a block
         :param block: <Block> Block to validate
         :param last_block: <Block> Last block in the chain
+        :param chain: <list[Block]> Chain to validate
+        :param address_to_balance: <defaultdict[str, int]> Address to balance
         :return: <bool> True if valid, False if not
         """
         chain = self.chain if chain is None else chain
 
-        pow_ok = (
-            block.hash[: block.difficulty] == "0" * block.difficulty
-        )
+        pow_ok = block.hash[: block.difficulty] == "0" * block.difficulty
         links = block.previous_hash == last_block.hash
         if pow_ok and not links:
             return "fork"
@@ -290,11 +389,16 @@ class Blockchain:
         seen_transactions = set()
         # Just one coinbase per block
         is_seen_coinbase = False
-        accumulated_balance: defaultdict[str, int] = defaultdict(int)
-        for past in chain:
-            for tx in past.data:
-                accumulated_balance[tx.sender_address] -= tx.amount
-                accumulated_balance[tx.recipient_address] += tx.amount
+        expected_coinbase = self.coinbase_amount(len(chain), block.data)
+        accumulated_balance: defaultdict[str, int] = (
+            address_to_balance
+            if address_to_balance is not None
+            else self.address_to_balance.copy()
+        )
+        # for past in chain:
+        #     for tx in past.data:
+        #         accumulated_balance[tx.sender_address] -= tx.amount
+        #         accumulated_balance[tx.recipient_address] += tx.amount
 
         for tx in block.data:
             if self.is_transaction_duplicated(tx, chain=chain):
@@ -305,14 +409,16 @@ class Blockchain:
 
             seen_transactions.add(tx)
 
-            if tx.is_coinbase and (tx.amount != 1 or is_seen_coinbase):
+            if tx.is_coinbase and (
+                tx.amount != expected_coinbase or tx.fee != 0 or is_seen_coinbase
+            ):
                 return False
 
             if tx.is_coinbase:
                 is_seen_coinbase = True
                 accumulated_balance[tx.recipient_address] += tx.amount
             else:
-                accumulated_balance[tx.sender_address] -= tx.amount
+                accumulated_balance[tx.sender_address] -= tx.amount + tx.fee
 
                 if accumulated_balance[tx.sender_address] < 0:
                     return False
@@ -341,6 +447,7 @@ class Blockchain:
         """
         last_block = chain[0]
         current_index = 1
+        address_to_balance = defaultdict(int)
 
         while current_index < len(chain):
             block = chain[current_index]
@@ -361,7 +468,15 @@ class Blockchain:
 
             logger.debug("Block hash=%s difficulty=%s", block.hash, block.difficulty)
             # Validate the proof of work like we mined the block
-            if self.validate_block(block, last_block, chain=chain[:current_index]) is not True:
+            if (
+                self.validate_block(
+                    block,
+                    last_block,
+                    chain=chain[:current_index],
+                    address_to_balance=address_to_balance,
+                )
+                is not True
+            ):
                 logger.warning(
                     "Chain invalid at index=%s: invalid proof",
                     current_index,
@@ -384,18 +499,14 @@ class Blockchain:
         :return: <int> Balance of the address
         """
 
-        balance = 0
-        for block in self.chain:
-            for transaction in block.data:
-                if transaction.sender_address == address:
-                    balance -= transaction.amount
-                if transaction.recipient_address == address:
-                    balance += transaction.amount
-
         if include_pending_transactions:
-            for transaction in self.current_transactions:
-                if transaction.sender_address == address:
-                    balance -= transaction.amount
-                if transaction.recipient_address == address:
-                    balance += transaction.amount
-        return balance
+            balance = self.address_to_balance[address]
+            for tx in self.current_transactions:
+                if tx.sender_address == address:
+                    balance -= tx.amount + tx.fee
+
+                if tx.recipient_address == address:
+                    balance += tx.amount
+            return balance
+
+        return self.address_to_balance[address]

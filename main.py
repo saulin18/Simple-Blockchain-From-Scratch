@@ -1,3 +1,5 @@
+from __future__ import annotations
+import asyncio
 from fastapi.responses import JSONResponse
 from core.exceptions import (
     DuplicatedTransactionError,
@@ -15,7 +17,7 @@ from logging_config import LOGGING_CONFIG
 from typing import TypedDict
 
 from core.blockchain import Blockchain
-from core.transaction import Transaction
+from core.transaction import ALLOWED_FEES, Transaction
 from fastapi.middleware.cors import CORSMiddleware
 
 from models import (
@@ -31,6 +33,7 @@ from logging import getLogger
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from middlewares import blockchain_error_handler, RequestContextLogMiddleware
+from core.mining_loop import MiningLoop
 
 logger = getLogger(__name__)
 
@@ -42,6 +45,7 @@ class LifespanState(TypedDict):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[LifespanState, Any]:
     lifespan_state = LifespanState(blockchain=Blockchain())
+    asyncio.create_task(MiningLoop(lifespan_state["blockchain"]).run())
     yield lifespan_state
     # close clients, release any open resources
 
@@ -80,17 +84,24 @@ async def mine(
     request: MineRequest,
     blockchain: Blockchain = Depends(get_blockchain),
     validator: Consensues = Depends(get_consensues),
-) -> MineResponse:
+) -> MineResponse | JSONResponse:
     # The sender is "0" to signify that this node has mined a new coin.
     request.validate_address()
-    blockchain.new_transaction(
-        sender="0",
-        recipient=request.address,
-        amount=1,
+    selected = blockchain.select_transactions(
+        balance=blockchain.address_to_balance.copy()
     )
     last_block_hash = blockchain.last_block.hash
 
-    block = blockchain.new_block(is_pending_for_mining=True)
+    block = blockchain.prepare_block(
+        miner_address=request.address, transactions=selected
+    )
+    await asyncio.to_thread(block.mine)
+    if blockchain.last_block.hash != block.previous_hash:
+        return JSONResponse(
+            content={"message": "Tip moved while mining"},
+            status_code=409,
+        )
+    blockchain.commit_block(block)
     logger.info("Mine completed index=%s hash=%s", block.index, block.hash)
 
     background_tasks.add_task(
@@ -142,10 +153,11 @@ async def new_transaction(
     validator: Consensues = Depends(get_consensues),
 ):
     logger.info(
-        "POST /transactions/new from=%s to=%s amount=%s",
+        "POST /transactions/new from=%s to=%s amount=%s fee=%s",
         transaction.from_address,
         transaction.to_address,
         transaction.amount,
+        transaction.fee,
     )
     is_coinbase = transaction.from_address == "0"
     if is_coinbase:
@@ -160,6 +172,7 @@ async def new_transaction(
             transaction.amount,
             transaction.signature,
             transaction.timestamp,
+            transaction.fee,
         )
     except DuplicatedTransactionError as e:
         return JSONResponse(content={"message": str(e)}, status_code=400)
@@ -172,6 +185,12 @@ async def new_transaction(
     return {
         "message": f"Transaction will be added to Block {blockchain.last_block.index + 1}"
     }
+
+
+@app.get("/fees")
+def fees() -> dict[str, int]:
+    low, mid, high = ALLOWED_FEES
+    return {"low": low, "mid": mid, "high": high}
 
 
 @app.get("/balance/{address}")
@@ -225,6 +244,7 @@ async def consensus(
         chain=[BlockModel.from_block(block) for block in blockchain.chain],
     )
 
+
 @app.get("/transaction/{transaction_signature}/depth")
 def get_transaction_depth(
     transaction_signature: str,
@@ -238,11 +258,12 @@ def get_transaction_depth(
     depth = blockchain.get_transaction_depth(transaction_signature)
     return {"depth": depth}
 
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=5000,
+        port=8000,
         reload=True,
         log_level="info",
         log_config=LOGGING_CONFIG,

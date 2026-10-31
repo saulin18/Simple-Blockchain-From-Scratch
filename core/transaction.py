@@ -8,6 +8,7 @@ import logging
 from core.exceptions import (
     InvalidAddressError,
     InvalidAmountError,
+    InvalidFeeError,
     InvalidSignatureError,
     SelfTransferError,
 )
@@ -15,6 +16,7 @@ from core.exceptions import (
 logger = logging.getLogger(__name__)
 
 COINBASE_SENDER = "0"
+ALLOWED_FEES = (1, 2, 5)
 
 
 class Transaction:
@@ -25,12 +27,14 @@ class Transaction:
         amount: int,
         timestamp: int | None = None,
         signature: str = "",
+        fee: int = 0,
     ):
         self.sender_address = sender_address
         self.recipient_address = recipient_address
         self.amount = amount
         self.timestamp = timestamp if timestamp is not None else int(time.time())
         self.signature = signature
+        self.fee = fee
 
     def to_dict(self) -> dict[str, str | int]:
         return {
@@ -38,12 +42,13 @@ class Transaction:
             "recipient": self.recipient_address,
             "amount": self.amount,
             "timestamp": self.timestamp,
+            "fee": self.fee,
         }
 
     def __repr__(self) -> str:
         return (
             f"Transaction(sender={self.sender_address}, "
-            f"recipient={self.recipient_address}, amount={self.amount})"
+            f"recipient={self.recipient_address}, amount={self.amount}, fee={self.fee})"
         )
 
     def __eq__(self, other: object) -> bool:
@@ -55,10 +60,20 @@ class Transaction:
             and self.amount == other.amount
             and self.timestamp == other.timestamp
             and self.signature == other.signature
+            and self.fee == other.fee
         )
-        
+
     def __hash__(self) -> int:
-        return hash((self.sender_address, self.recipient_address, self.amount, self.timestamp, self.signature))
+        return hash(
+            (
+                self.sender_address,
+                self.recipient_address,
+                self.amount,
+                self.timestamp,
+                self.signature,
+                self.fee,
+            )
+        )
 
     @property
     def is_coinbase(self) -> bool:
@@ -99,7 +114,17 @@ class Transaction:
             raise SelfTransferError("Sender and recipient cannot be the same")
 
         if self.is_coinbase:
+            if self.fee != 0:
+                raise InvalidFeeError("Coinbase fee must be zero")
             return
+
+        if self.fee not in ALLOWED_FEES:
+            logger.warning(
+                "Invalid fee sender=%s fee=%s",
+                self.sender_address,
+                self.fee,
+            )
+            raise InvalidFeeError("Fee must be 1, 2 or 5")
 
         if not self.signature or self.timestamp is None:
             raise InvalidSignatureError("Signature and timestamp are required")

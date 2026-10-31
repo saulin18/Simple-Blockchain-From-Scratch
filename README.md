@@ -1,12 +1,13 @@
 # Simple, minimal blockchain built from scratch in Python
 
-I'm using FastAPI for the HTTP layer, Pydantic for validating data. 
+FastAPI serves the HTTP layer and Pydantic validates the payloads. Each process is one node: it keeps an account-balance chain, checks Ed25519 signatures, and mines with proof of work.
 
-Next steps:
+Transactions choose a fee of 1, 2, or 5. A block takes the ten highest fees that the sender can pay. The coinbase pays the miner the block reward plus those fees. While the mempool has transactions, a background loop mines on this node and pushes the block to registered peers. A block that does not link to the local tip triggers a pull of the longest valid chain.
 
-- Implement P2P, Docker, Gossip.
-- Maybe a mining loop
-- Maybe a demo with some nodes using Docker with replicas mechanism or Kubernetes
+## Next steps
+
+- Add tests.
+- Run a demo with a few nodes, using Docker or Kubernetes.
 
 ## Quick Start
 
@@ -30,10 +31,11 @@ uv run fastapi dev
 
 Visit http://localhost:8000
 
+The miner address is printed in the log when the process starts. The coinbase of this node pays that address.
+
 ## Project Structure
 
 - `main.py` - FastAPI application with endpoints
 - `pyproject.toml` - Project dependencies
 - `models.py` - Pydantic schemas
-
-In `core` we have the logic for the blockchain. It's simple at this moment, I plan to develop more in the meantime, stay tuned! 
+- `core/` - chain, blocks, transactions, consensus, and the mining loop

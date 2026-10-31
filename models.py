@@ -11,6 +11,7 @@ class TransactionModel(BaseModel):
     amount: int
     signature: str
     timestamp: int
+    fee: int
 
     @classmethod
     def from_transaction(cls, transaction: Transaction) -> "TransactionModel":
@@ -20,6 +21,7 @@ class TransactionModel(BaseModel):
             amount=transaction.amount,
             signature=transaction.signature,
             timestamp=transaction.timestamp,
+            fee=transaction.fee,
         )
 
     @classmethod
@@ -30,6 +32,7 @@ class TransactionModel(BaseModel):
             transaction.amount,
             timestamp=transaction.timestamp,
             signature=transaction.signature,
+            fee=transaction.fee,
         )
 
 

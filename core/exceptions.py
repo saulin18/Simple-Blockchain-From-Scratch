@@ -22,6 +22,10 @@ class InvalidAmountError(InvalidTransactionError):
     """Amount is not allowed (e.g. negative or zero)."""
 
 
+class InvalidFeeError(InvalidTransactionError):
+    """Fee is not one of the protocol values."""
+
+
 class SelfTransferError(InvalidTransactionError):
     """Sender and recipient must be different."""
 

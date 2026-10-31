@@ -4,6 +4,7 @@ from core.blockchain import Blockchain
 from logging import getLogger
 import httpx
 from models import BlockModel
+from collections import defaultdict
 
 logger = getLogger(__name__)
 
@@ -101,8 +102,19 @@ class Consensues:
                 if transaction not in transactions_in_new_chain
                 and not transaction.is_coinbase
             )
-            
+
             self.blockchain.chain = new_chain
+            self.blockchain.address_to_balance = defaultdict(int)
+
+            for block in new_chain:
+                for transaction in block.data:
+                    self.blockchain.address_to_balance[
+                        transaction.sender_address
+                    ] -= transaction.amount + transaction.fee
+                    self.blockchain.address_to_balance[
+                        transaction.recipient_address
+                    ] += transaction.amount
+
             logger.info(
                 "Local chain replaced old_length=%s new_length=%s",
                 old_length,
